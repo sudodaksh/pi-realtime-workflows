@@ -8,6 +8,24 @@ Great for codebase audits, multi-perspective review, large refactors, and fan-ou
 
 Inspired by Anthropic's [dynamic workflows in Claude Code](https://claude.com/blog/introducing-dynamic-workflows-in-claude-code).
 
+## About this fork
+
+This is a fork of [`pi-dynamic-workflows`](https://github.com/Michaelliv/pi-dynamic-workflows) by
+[@Michaelliv](https://github.com/Michaelliv), which provides the core workflow primitive (sandboxed
+script, isolated subagents, `parallel`/`pipeline`, phases, structured output).
+
+It leans much harder into the [Claude Code](https://claude.com/claude-code) experience, with a UI/UX
+that closely mirrors it:
+
+- A focus-capturing **`/workflows` manager** modeled on Claude Code's — a bordered master/detail
+  two-pane overlay you scroll through (runs → phases → agents → a single agent's detail).
+- A **realtime** detail pane: while an agent runs, its activity (the tool calls it is making right
+  now, the in-flight one marked `▸`) streams in live and the clock ticks, instead of a static prompt.
+- **Honest per-agent usage** harvested from each subagent's own session — the real input/output token
+  split, cache reads, and `$` cost, reported the way Pi's own status bar does.
+- **Session-scoped resumable runs**: pause, resume, restart, and stop, backed by an agent-result
+  journal that replays completed work on re-run.
+
 ## Install
 
 ```bash
