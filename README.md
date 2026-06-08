@@ -28,11 +28,12 @@ that closely mirrors it:
 
 ## Install
 
-Not on npm yet — install from git:
+Not on npm yet — install straight from git:
 
 ```bash
-git clone https://github.com/sudodaksh/pi-realtime-workflows.git
-pi install ./pi-realtime-workflows
+pi install git:github.com/sudodaksh/pi-realtime-workflows
+# or from a local checkout
+pi install /path/to/pi-realtime-workflows
 ```
 
 Then in Pi:
