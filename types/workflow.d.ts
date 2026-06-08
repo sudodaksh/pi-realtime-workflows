@@ -1,9 +1,9 @@
 /**
- * Ambient globals available inside pi-dynamic-workflows workflow scripts.
+ * Ambient globals available inside pi-realtime-workflows workflow scripts.
  *
  * Add this to a JavaScript or TypeScript workflow file for editor IntelliSense:
  *
- *   /// <reference types="pi-dynamic-workflows/workflow" />
+ *   /// <reference types="pi-realtime-workflows/workflow" />
  */
 
 export {};

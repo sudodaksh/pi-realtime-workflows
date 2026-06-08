@@ -1,7 +1,7 @@
 {
-  "name": "pi-dynamic-workflows",
+  "name": "pi-realtime-workflows",
   "version": "1.0.1",
-  "description": "Claude-Code-style dynamic workflow orchestration for Pi.",
+  "description": "Claude-Code-style realtime workflow orchestration for Pi.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -43,9 +43,9 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Michaelliv/pi-dynamic-workflows.git"
+    "url": "git+https://github.com/sudodaksh/pi-realtime-workflows.git"
   },
-  "author": "michaelliv",
+  "author": "daksh",
   "license": "MIT",
   "dependencies": {
     "acorn": "^8.16.0"

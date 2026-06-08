@@ -1,6 +1,6 @@
-# pi-dynamic-workflows
+# pi-realtime-workflows
 
-> Claude-Code-style dynamic workflows for [Pi](https://github.com/earendil-works/pi).
+> Claude-Code-style realtime workflows for [Pi](https://github.com/earendil-works/pi).
 
 A Pi extension that adds a `workflow` tool. Instead of one assistant doing everything sequentially, the model writes a small JavaScript script that fans out the work across many isolated subagents, then synthesizes the results.
 
@@ -11,9 +11,9 @@ Inspired by Anthropic's [dynamic workflows in Claude Code](https://claude.com/bl
 ## Install
 
 ```bash
-pi install npm:pi-dynamic-workflows
+pi install npm:pi-realtime-workflows
 # or from a local checkout
-pi install /path/to/pi-dynamic-workflows
+pi install /path/to/pi-realtime-workflows
 ```
 
 Then in Pi:
@@ -150,7 +150,7 @@ Phases are discovered as the script runs, so conditional and loop-created phases
 Reusable workflow files can opt into editor hints for workflow globals:
 
 ```js
-/// <reference types="pi-dynamic-workflows/workflow" />
+/// <reference types="pi-realtime-workflows/workflow" />
 ```
 
 This declares `agent`, `parallel`, `pipeline`, `phase`, `log`, `args`, `cwd`, and `budget` for TypeScript-aware editors.
