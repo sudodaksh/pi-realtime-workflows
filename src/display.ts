@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentUsage } from "./agent.js";
 import type { WorkflowMeta } from "./workflow.js";
 
 export type WorkflowAgentStatus = "queued" | "running" | "done" | "error" | "skipped";
@@ -11,6 +12,18 @@ export interface WorkflowAgentSnapshot {
   status: WorkflowAgentStatus;
   resultPreview?: string;
   error?: string;
+  /** Headline billed tokens (input + output) for the subagent's own session. */
+  tokens?: number;
+  /** Full token/cost breakdown, so the detail view can show input/output/cache/cost honestly. */
+  usage?: AgentUsage;
+  cached?: boolean;
+  model?: string;
+  durationMs?: number;
+  /** When the live run started, so the detail clock can tick while the agent is still running. */
+  startedAt?: number;
+  toolCalls?: string[];
+  /** The full agent result, kept so the detail view can show the complete outcome. */
+  result?: unknown;
 }
 
 export interface WorkflowSnapshot {

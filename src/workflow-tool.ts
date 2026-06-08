@@ -1,15 +1,9 @@
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import {
-  createToolUpdateWorkflowDisplay,
-  createWorkflowSnapshot,
-  preview,
-  recomputeWorkflowSnapshot,
-  renderWorkflowText,
-  type WorkflowSnapshot,
-} from "./display.js";
-import { parseWorkflowScript, runWorkflow, type WorkflowRunResult } from "./workflow.js";
+import { createToolUpdateWorkflowDisplay, renderWorkflowText, type WorkflowSnapshot } from "./display.js";
+import { WorkflowRegistry, type WorkflowRun, type WorkflowRunStatus } from "./registry.js";
+import { parseWorkflowScript } from "./workflow.js";
 
 const workflowToolSchema = Type.Object({
   script: Type.String({
@@ -41,9 +35,12 @@ const workflowDisplayOptions = {
 export interface WorkflowToolOptions {
   cwd?: string;
   concurrency?: number;
+  /** Shared registry so launched runs show up in the `/workflows` manager. Defaults to a private one. */
+  registry?: WorkflowRegistry;
 }
 
 export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefinition<typeof workflowToolSchema, any> {
+  const registry = options.registry ?? new WorkflowRegistry();
   return defineTool({
     name: "workflow",
     label: "Workflow",
@@ -76,102 +73,60 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const script = normalizeWorkflowScript(params.script);
       const parsed = parseWorkflowScript(script);
-      let snapshot: WorkflowSnapshot = createWorkflowSnapshot(parsed.meta);
       const display = createToolUpdateWorkflowDisplay(onUpdate, undefined, workflowDisplayOptions);
 
-      const update = () => {
-        snapshot = recomputeWorkflowSnapshot(snapshot);
-        display.update(snapshot);
-      };
-
-      const recordPhase = (title: string | undefined) => {
-        if (!title) return;
-        if (!snapshot.phases.includes(title)) snapshot.phases.push(title);
-      };
-
-      let result: WorkflowRunResult;
-      try {
-        result = await runWorkflow(script, {
+      // The run is registered with the shared registry, so `/workflows` can watch and control it
+      // while this tool call streams its progress inline.
+      const run = registry.start({
+        script,
+        meta: parsed.meta,
+        args: params.args,
+        options: {
           cwd: options.cwd ?? ctx.cwd,
-          args: params.args,
-          signal,
           concurrency: options.concurrency,
-          session: {
-            modelRegistry: ctx.modelRegistry,
-            model: ctx.model,
-          },
-          onLog(message) {
-            snapshot.logs.push(message);
-            update();
-          },
-          onPhase(title) {
-            snapshot.currentPhase = title;
-            recordPhase(title);
-            update();
-          },
-          onAgentStart(event) {
-            if (signal?.aborted) throw new Error("Workflow was aborted");
-            recordPhase(event.phase);
-            snapshot.agents.push({
-              id: snapshot.agents.length + 1,
-              label: event.label,
-              phase: event.phase,
-              prompt: event.prompt,
-              status: "running",
-            });
-            update();
-          },
-          onAgentEnd(event) {
-            const agent = [...snapshot.agents]
-              .reverse()
-              .find((item) => item.label === event.label && item.status === "running");
-            if (agent) {
-              agent.status = event.result === null ? "error" : "done";
-              agent.resultPreview = preview(event.result);
-            }
-            update();
-          },
-        });
-      } catch (error) {
-        if (signal?.aborted || isAbortError(error)) {
-          for (const agent of snapshot.agents) {
-            if (agent.status === "running") {
-              agent.status = "skipped";
-              agent.error = "aborted";
-            }
-          }
-          snapshot = recomputeWorkflowSnapshot(snapshot);
-          display.complete(snapshot);
-          throw new Error("Workflow was aborted");
-        }
-        throw error;
+          session: { modelRegistry: ctx.modelRegistry, model: ctx.model },
+        },
+      });
+
+      const onAbort = () => registry.stop(run.id);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const unsubscribe = registry.subscribe(() => display.update(toToolSnapshot(run)));
+      try {
+        await registry.whenSettled(run.id);
+      } finally {
+        unsubscribe();
+        signal?.removeEventListener("abort", onAbort);
       }
 
-      if (result.agentCount === 0) {
+      const finalSnapshot = toToolSnapshot(run);
+      display.complete(finalSnapshot);
+
+      if (signal?.aborted) throw new Error("Workflow was aborted");
+
+      if (run.status === "done" && finalSnapshot.agentCount === 0) {
         throw new Error(
           "workflow scripts must call agent() at least once; this workflow declared phases but did not run any subagents",
         );
       }
 
-      snapshot.result = result.result;
-      snapshot.durationMs = result.durationMs;
-      snapshot = recomputeWorkflowSnapshot(snapshot);
-      display.complete(snapshot);
+      const summary = `Workflow ${run.meta.name} ${describeStatus(run.status)} with ${finalSnapshot.agentCount} agent(s).`;
+      const body =
+        run.status === "error"
+          ? `\n\n${run.error ?? "unknown error"}`
+          : run.status === "done"
+            ? `\n\nResult:\n${JSON.stringify(run.result, null, 2)}`
+            : `\n\nThe run is ${run.status}. Open /workflows to inspect or resume it.`;
 
       return {
-        content: [
-          {
-            type: "text",
-            text: `Workflow ${result.meta.name} completed with ${result.agentCount} agent(s).\n\nResult:\n${JSON.stringify(result.result, null, 2)}`,
-          },
-        ],
+        ...(run.status === "error" ? { isError: true } : {}),
+        content: [{ type: "text", text: summary + body }],
         details: {
-          ...snapshot,
-          meta: result.meta,
-          phases: result.phases,
-          logs: result.logs,
-          result: result.result,
-          durationMs: result.durationMs,
+          ...finalSnapshot,
+          meta: run.meta,
+          phases: finalSnapshot.phases,
+          logs: finalSnapshot.logs,
+          result: run.result,
+          durationMs: finalSnapshot.durationMs,
         },
       };
     },
@@ -203,7 +158,22 @@ function normalizeWorkflowScript(script: string): string {
   return text;
 }
 
-function isAbortError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return /\babort(?:ed)?\b/i.test(error.message);
+/** Snapshot for the inline display, augmented with the run's result and elapsed time. */
+function toToolSnapshot(run: WorkflowRun): WorkflowSnapshot {
+  return {
+    ...run.snapshot,
+    result: run.result,
+    durationMs: (run.endedAt ?? Date.now()) - run.startedAt,
+  };
+}
+
+function describeStatus(status: WorkflowRunStatus): string {
+  switch (status) {
+    case "done":
+      return "completed";
+    case "error":
+      return "failed";
+    default:
+      return status;
+  }
 }

@@ -2,6 +2,7 @@ import vm from "node:vm";
 import type { Node } from "acorn";
 import { parse } from "acorn";
 import type { TSchema } from "typebox";
+import type { AgentRunStats, AgentUsage } from "./agent.js";
 import { WorkflowAgent, type WorkflowAgentOptions } from "./agent.js";
 
 export interface WorkflowMetaPhase {
@@ -17,16 +18,76 @@ export interface WorkflowMeta {
   phases?: WorkflowMetaPhase[];
 }
 
+/** One completed agent() call, keyed by its deterministic call index. */
+export interface WorkflowJournalEntry {
+  /** Hash of (prompt, options) when the result was produced; a mismatch invalidates the cache. */
+  key: string;
+  result: unknown;
+  /** Real metrics the subagent reported, so a cached replay reports the same numbers. */
+  tokens: number;
+  /** Full token/cost breakdown, when the subagent reported it (absent for fakes/tests). */
+  usage?: AgentUsage;
+  model?: string;
+  durationMs?: number;
+  toolCalls: string[];
+}
+
+/** Per-run record of completed agent() calls, used to replay results on resume. */
+export type WorkflowJournal = Map<number, WorkflowJournalEntry>;
+
+export interface WorkflowAgentStartEvent {
+  index: number;
+  label: string;
+  phase?: string;
+  prompt: string;
+  /** True when the result was replayed from the journal instead of executed live. */
+  cached: boolean;
+}
+
+export interface WorkflowAgentEndEvent {
+  index: number;
+  label: string;
+  phase?: string;
+  result: unknown;
+  cached: boolean;
+  /** Real (or, for fakes, estimated) tokens attributed to this agent. */
+  tokens: number;
+  /** Full token/cost breakdown, when the subagent reported it. */
+  usage?: AgentUsage;
+  model?: string;
+  durationMs?: number;
+  toolCalls: string[];
+}
+
+/** Mid-flight progress for a live agent: streamed as it completes turns and tool calls. */
+export interface WorkflowAgentProgressEvent {
+  index: number;
+  label: string;
+  phase?: string;
+  /** Billed tokens so far (input + output). */
+  tokens: number;
+  usage: AgentUsage;
+  model?: string;
+  durationMs: number;
+  /** Tool calls made so far; the last one is the call currently in flight. */
+  toolCalls: string[];
+}
+
 export interface WorkflowRunOptions extends WorkflowAgentOptions {
   args?: unknown;
   agent?: Pick<WorkflowAgent, "run">;
   concurrency?: number;
   tokenBudget?: number | null;
   signal?: AbortSignal;
+  /** Pre-populated journal whose completed entries replay instead of re-running. Mutated as live calls complete. */
+  journal?: WorkflowJournal;
+  /** Populated with a stop() callback per in-flight agent (keyed by call index); removed when the agent settles. */
+  agentControls?: Map<number, () => void>;
   onLog?: (message: string) => void;
   onPhase?: (title: string) => void;
-  onAgentStart?: (event: { label: string; phase?: string; prompt: string }) => void;
-  onAgentEnd?: (event: { label: string; phase?: string; result: unknown }) => void;
+  onAgentStart?: (event: WorkflowAgentStartEvent) => void;
+  onAgentProgress?: (event: WorkflowAgentProgressEvent) => void;
+  onAgentEnd?: (event: WorkflowAgentEndEvent) => void;
 }
 
 export interface WorkflowRunResult<T = unknown> {
@@ -36,6 +97,7 @@ export interface WorkflowRunResult<T = unknown> {
   phases: string[];
   agentCount: number;
   durationMs: number;
+  journal: WorkflowJournal;
 }
 
 export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema | undefined> {
@@ -74,6 +136,7 @@ export async function runWorkflow<T = unknown>(
   );
   const limiter = createLimiter(concurrency);
   const pendingAgentRuns = new Set<Promise<unknown>>();
+  const journal: WorkflowJournal = options.journal ?? new Map();
 
   const log = (message: string) => {
     const text = String(message);
@@ -103,29 +166,104 @@ export async function runWorkflow<T = unknown>(
     if (budget.total !== null && budget.remaining() <= 0) throw new Error("workflow token budget exhausted");
     const taskPrompt = requireString(prompt, "agent prompt");
     const normalizedOptions = normalizeAgentOptions(agentOptions);
+    // Assigned at call time, in deterministic program order, so it is stable across re-runs.
+    const callIndex = state.agentCount++;
     const assignedPhase = normalizedOptions.phase ?? state.currentPhase;
     const requestedLabel = normalizedOptions.label?.trim();
+    const label = requestedLabel || defaultAgentLabel(assignedPhase, callIndex + 1);
+    const key = journalKey(taskPrompt, normalizedOptions);
+
+    const cached = journal.get(callIndex);
+    if (cached && cached.key === key) {
+      options.onAgentStart?.({ index: callIndex, label, phase: assignedPhase, prompt: taskPrompt, cached: true });
+      state.spent += cached.tokens;
+      options.onAgentEnd?.({
+        index: callIndex,
+        label,
+        phase: assignedPhase,
+        result: cached.result,
+        cached: true,
+        tokens: cached.tokens,
+        usage: cached.usage,
+        model: cached.model,
+        durationMs: cached.durationMs,
+        toolCalls: cached.toolCalls,
+      });
+      return cached.result;
+    }
+    if (cached) journal.delete(callIndex);
+
     const run = limiter(async () => {
-      state.agentCount++;
-      const label = requestedLabel || defaultAgentLabel(assignedPhase, state.agentCount);
-      options.onAgentStart?.({ label, phase: assignedPhase, prompt: taskPrompt });
+      options.onAgentStart?.({ index: callIndex, label, phase: assignedPhase, prompt: taskPrompt, cached: false });
+      const agentController = new AbortController();
+      const onRunAbort = () => agentController.abort();
+      options.signal?.addEventListener("abort", onRunAbort, { once: true });
+      options.agentControls?.set(callIndex, () => agentController.abort());
+      let stats: AgentRunStats | undefined;
       try {
         throwIfAborted();
         const result = await agentRunner.run(taskPrompt, {
           label,
           schema: normalizedOptions.schema,
-          signal: options.signal,
+          signal: agentController.signal,
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
+          onProgress: (reported: AgentRunStats) => {
+            stats = reported;
+            options.onAgentProgress?.({
+              index: callIndex,
+              label,
+              phase: assignedPhase,
+              tokens: reported.usage.tokens,
+              usage: reported.usage,
+              model: reported.model,
+              durationMs: reported.durationMs,
+              toolCalls: reported.toolCalls,
+            });
+          },
         } as any);
         throwIfAborted();
-        state.spent += estimateTokens(result);
-        options.onAgentEnd?.({ label, phase: assignedPhase, result });
+        // Prefer the subagent's real metrics; fall back to a result-size estimate (e.g. for fakes/tests).
+        const tokens = stats?.usage.tokens ?? estimateTokens(result);
+        const entry: WorkflowJournalEntry = {
+          key,
+          result,
+          tokens,
+          usage: stats?.usage,
+          model: stats?.model,
+          durationMs: stats?.durationMs,
+          toolCalls: stats?.toolCalls ?? [],
+        };
+        journal.set(callIndex, entry);
+        state.spent += tokens;
+        options.onAgentEnd?.({
+          index: callIndex,
+          label,
+          phase: assignedPhase,
+          result,
+          cached: false,
+          tokens,
+          usage: entry.usage,
+          model: entry.model,
+          durationMs: entry.durationMs,
+          toolCalls: entry.toolCalls,
+        });
         return result;
       } catch (error) {
         if (options.signal?.aborted) throw error;
         log(`agent ${label} failed: ${error instanceof Error ? error.message : String(error)}`);
-        options.onAgentEnd?.({ label, phase: assignedPhase, result: null });
+        options.onAgentEnd?.({
+          index: callIndex,
+          label,
+          phase: assignedPhase,
+          result: null,
+          cached: false,
+          tokens: 0,
+          toolCalls: [],
+        });
         return null;
+      } finally {
+        options.signal?.removeEventListener("abort", onRunAbort);
+        options.agentControls?.delete(callIndex);
       }
     });
     pendingAgentRuns.add(run);
@@ -222,6 +360,7 @@ export async function runWorkflow<T = unknown>(
     phases: state.phases,
     agentCount: state.agentCount,
     durationMs: Date.now() - started,
+    journal,
   };
 }
 
@@ -452,4 +591,21 @@ function buildAgentInstructions(phase: string | undefined, options: AgentOptions
 
 function estimateTokens(value: unknown): number {
   return Math.ceil(JSON.stringify(value ?? "").length / 4);
+}
+
+/**
+ * Stable cache key for an agent() call. Computed from the prompt and the options that
+ * change a subagent's output, in a fixed field order so the same call hashes identically
+ * across re-runs. A mismatch at a given call index invalidates that journal entry.
+ */
+function journalKey(prompt: string, options: AgentOptions): string {
+  return JSON.stringify([
+    prompt,
+    options.label ?? null,
+    options.phase ?? null,
+    options.model ?? null,
+    options.isolation ?? null,
+    options.agentType ?? null,
+    options.schema ?? null,
+  ]);
 }

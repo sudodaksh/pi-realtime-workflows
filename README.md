@@ -45,6 +45,76 @@ The model will write a workflow script and call the `workflow` tool. Live progre
 
 Press `Esc` to cancel a running workflow. Active subagents are aborted and surfaced as skipped.
 
+## The `/workflows` manager
+
+Every run a workflow tool starts is registered for the session. Type `/workflows` to open a
+focus-capturing, Claude-Code-style overlay: a header band with the workflow name, description, and
+live status, then a bordered master/detail two-pane view, then a footer of controls.
+
+```text
+─────────────────────────────────────────────────────────────────────────────────────────
+ audit_endpoints
+ Audit every API endpoint under src/routes for missing auth checks   1/3 agents · 41s · running
+┌─ Phases ───────────────────┬─ verify /users ──────────────────────────────────────────────┐
+│  ✓ Scan  1/1               │  ▶ Running · Sonnet 4.6                                       │
+│❯ ▶ Verify  0/2 · 2 running │  12.4k in · 5.2k out · 480.0k cached · $0.21 · 4 tools · 0m 9s│
+│                            │                                                              │
+│                            │  Activity · 4 tool calls so far                              │
+│                            │    Read(routes/users.ts)                                     │
+│                            │    Grep(requireAuth)                                         │
+│                            │    ▸ Bash(rg -n "export const" routes/ …)                    │
+└────────────────────────────┴──────────────────────────────────────────────────────────────┘
+ ↑↓ agent · j/k scroll · esc back · x stop · r restart · p pause/resume
+```
+
+Pressing `Enter` drills in: run list → its phases → a phase's agents → a single agent's detail. The
+left pane is always the navigation list; the right pane shows the selected phase's agents, and at the
+deepest level the agent's detail — its status and model, the real token/cost breakdown, a prompt
+preview, its tool calls, and the full outcome, scrollable with `j`/`k`. A run with a single phase
+opens straight to its agents. `Esc` backs out one level and closes the overlay from the top.
+
+The detail is **live**: while an agent is running, its activity (the tool calls it is making right
+now, the in-flight one marked `▸`) is hoisted above the prompt and the clock ticks as it works, so
+you can watch what is happening in the moment rather than a static prompt.
+
+Each agent row carries the subagent's **real** usage harvested from its session — not an estimate.
+The token line is broken down the way Pi's own status bar reports it: `input` and `output` are the
+genuinely billed tokens, `cached` is the (large but cheap) context re-read from the prompt cache each
+turn, and `$` is the real cost. Each subagent runs in its **own fresh session**, so these numbers are
+that session's totals and have nothing to do with the parent conversation's context — it is not
+re-reading your chat history. (A single conflated "total tokens" figure that folds the cache re-reads
+back in is what made each agent look like it cost ~500k tokens; the breakdown shows the truth.)
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` (or `k` / `j`) | Move the selection |
+| `Enter` / `→` | Drill into the selected run, phase, or agent |
+| `Esc` / `←` | Back out one level; close from the run list |
+| `j` / `k` | Scroll the agent detail when it overflows |
+| `p` | Pause or resume the selected run |
+| `x` | Stop the selected agent, or the whole run when a run is selected |
+| `r` | Restart the selected agent |
+| `s` | Save the run's script to `.pi/workflows/<name>.js` |
+
+The overlay reads live state, so progress, token totals, and elapsed time update while runs are
+still in flight. The same registry backs the inline tool display and the manager.
+
+### Pause, resume, and restart
+
+Runs are resumable within the session. The runtime journals each `agent()` call by its
+deterministic call index, so re-running the same script replays completed results instantly and
+only runs what is left:
+
+- **Pause** (`p`) aborts in-flight subagents but keeps the journal. **Resume** (`p` again) re-runs
+  the script: finished agents replay from the journal, the rest run live.
+- **Restart** (`r`) drops the selected agent's journaled result and every later one (which depended
+  on it), then relaunches — the unchanged prefix replays while the target and its successors run
+  live. This also re-runs an agent that is currently stuck.
+- **Stop** (`x` on a run) ends the run but keeps completed work, so you can still inspect it.
+
+Journals live in memory for the session. Exiting Pi while a run is unfinished starts it fresh next
+time.
+
 ## Workflow script shape
 
 A workflow is plain JavaScript. The first statement must export literal metadata. `name` and `description` are required; `phases` is optional documentation for an expected outline. The live progress view is driven by `phase(...)` calls at runtime:
@@ -147,12 +217,15 @@ Subagents run in fresh in-memory Pi sessions with the standard coding tools, so 
 
 | File | Purpose |
 | --- | --- |
-| `src/workflow.ts` | AST-validated parser and sandboxed workflow runtime. |
+| `src/workflow.ts` | AST-validated parser and sandboxed workflow runtime, including the resumable agent journal. |
+| `src/registry.ts` | `WorkflowRegistry`: holds every run for the session and owns pause/resume/restart/stop. |
 | `src/workflow-tool.ts` | The Pi `workflow` tool, prompt guidelines, rendering, abort handling. |
+| `src/workflow-manager.ts` | The `/workflows` overlay component plus its pure view-model (navigation + rendering). |
+| `src/workflow-command.ts` | Opens the manager overlay and saves a run's script. |
 | `src/agent.ts` | `WorkflowAgent`, an in-memory Pi subagent runner. |
 | `src/structured-output.ts` | Terminating structured-output tool backed by TypeBox/JSON Schema. |
 | `src/display.ts` | Workflow snapshots and compact text renderers. |
-| `extensions/workflow.ts` | The Pi extension entrypoint. |
+| `extensions/workflow.ts` | The Pi extension entrypoint: registers the tool and the `/workflows` command. |
 
 ## Development
 
@@ -162,11 +235,16 @@ npm test     # biome check + tsc + unit tests
 npm run dev
 ```
 
-Parser unit tests live in `tests/workflow-parser.test.ts` and cover both accepted and rejected script shapes.
+Unit tests cover the parser (`tests/workflow-parser.test.ts`), the runtime and its journal
+(`tests/workflow-runtime.test.ts`), the run registry's lifecycle (`tests/workflow-registry.test.ts`),
+and the manager's navigation and rendering (`tests/workflow-manager.test.ts`).
 
 ## Status
 
-This is a prototype. It implements the core workflow primitive (script, subagents, parallel/pipeline, phases, abort, structured output) but does not yet implement persisted or resumable runs, or a `/workflows` manager.
+This is a prototype. It implements the core workflow primitive (script, subagents,
+parallel/pipeline, phases, abort, structured output), the `/workflows` manager overlay, and
+session-scoped resumable runs (pause/resume/restart backed by an agent journal). Runs are not yet
+persisted across Pi restarts.
 
 ## License
 
