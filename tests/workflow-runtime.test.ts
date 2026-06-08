@@ -204,6 +204,58 @@ return { ok: true }
   assert.deepEqual(result.journal.get(0)?.toolCalls, ["Bash(ls)", "Read(x)"]);
 });
 
+test("runWorkflow forwards the per-agent model option to the runner", async () => {
+  const seen: Array<string | undefined> = [];
+  const modelAgent = {
+    async run(prompt: string, opts?: { model?: string }): Promise<string> {
+      seen.push(opts?.model);
+      return `result:${prompt}`;
+    },
+  };
+  await runWorkflow(
+    `export const meta = { name: 'model_demo', description: 'Pick a subagent model' }
+phase('Work')
+await agent('a', { label: 'a', model: 'openai/gpt-5.5' })
+await agent('b', { label: 'b' })
+return { ok: true }
+`,
+    { agent: modelAgent },
+  );
+  assert.deepEqual(seen, ["openai/gpt-5.5", undefined], "model flows through per call; undefined when unset");
+});
+
+test("runWorkflow forwards the per-agent thinking level and rejects an invalid one", async () => {
+  const seen: Array<string | undefined> = [];
+  const thinkingAgent = {
+    async run(prompt: string, opts?: { thinking?: string }): Promise<string> {
+      seen.push(opts?.thinking);
+      return `result:${prompt}`;
+    },
+  };
+  await runWorkflow(
+    `export const meta = { name: 'think_demo', description: 'Pick a thinking level' }
+phase('Work')
+await agent('a', { label: 'a', thinking: 'high' })
+await agent('b', { label: 'b' })
+return { ok: true }
+`,
+    { agent: thinkingAgent },
+  );
+  assert.deepEqual(seen, ["high", undefined], "thinking flows through; undefined uses the default");
+
+  await assert.rejects(
+    () =>
+      runWorkflow(
+        `export const meta = { name: 'bad_think', description: 'Invalid thinking level' }
+await agent('a', { label: 'a', thinking: 'ultra' })
+return { ok: true }
+`,
+        { agent: thinkingAgent },
+      ),
+    /agent thinking must be one of: off, minimal, low, medium, high, xhigh/,
+  );
+});
+
 test("runWorkflow allows prompts that mention nondeterministic API names", async () => {
   const result = await runWorkflow(
     `export const meta = {

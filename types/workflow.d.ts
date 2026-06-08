@@ -31,8 +31,10 @@ declare global {
     phase?: string;
     /** JSON Schema for structured output. When present, the returned value is typed as unknown unless you provide a generic. */
     schema?: TSchema;
-    /** Requested model name. Currently passed as subagent guidance. */
+    /** Model to run this subagent on: `provider/id`, a bare id, or the friendly name. Falls back to the orchestrator's model if unknown. */
     model?: string;
+    /** Reasoning effort for this subagent. Omit to use the default; only set it when asked. */
+    thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
     /** Requested isolation mode. */
     isolation?: "worktree";
     /** Requested subagent role/type. */

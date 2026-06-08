@@ -219,6 +219,49 @@ const finding = await agent('Find security-sensitive files.', {
 
 Under the hood this is a Pi `structured_output` tool with `terminate: true`, so the subagent ends on that call without an extra assistant turn.
 
+### Choosing a subagent model
+
+By default every subagent inherits the orchestrator's model — i.e. whatever model you're running
+Pi on. To run the workers on a *different* model, pass `opts.model`. This is how you get the
+"a strong model plans and synthesizes, cheaper/faster workers do the legwork" split:
+
+```js
+// Orchestrator (this workflow's author) is on Opus 4.8; run the workers on GPT-5.5.
+const ports = await parallel(
+  actions.map((a) => () =>
+    agent('Port ' + a + ' to Python.', { label: 'port ' + a, model: 'openai/gpt-5.5' }),
+  ),
+)
+
+// ...then synthesize with a stronger model.
+const review = await agent('Review these ports and flag regressions:\n' + JSON.stringify(ports), {
+  label: 'final review',
+  model: 'anthropic/claude-opus-4-8',
+})
+```
+
+`opts.model` accepts a `provider/id` (`openai/gpt-5.5`), a bare id (`gpt-5.5`), or the friendly name
+(`GPT-5.5`), resolved against your Pi model registry. The model must have auth configured in Pi; an
+unrecognized name falls back to the orchestrator's model. Each agent's real model is shown in the
+`/workflows` detail. (Just tell Pi which model to use for the workers and it will set `opts.model` on
+the `agent()` calls for you.)
+
+### Choosing a thinking level
+
+`opts.thinking` sets a subagent's reasoning effort — one of `off`, `minimal`, `low`, `medium`,
+`high`, `xhigh`:
+
+```js
+const review = await agent('Deeply review these ports for regressions.', {
+  label: 'final review',
+  thinking: 'high',
+})
+```
+
+When omitted, the subagent uses Pi's default (your settings, else `medium`) — it is **never forced
+lower**. Ask for a lower level explicitly if you want cheaper fan-out (`opts.thinking: 'low'`).
+Subagents do not inherit your main session's live thinking level, so set it here when it matters.
+
 ## How it works
 
 ```text

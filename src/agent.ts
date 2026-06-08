@@ -1,4 +1,4 @@
-import type { AssistantMessage, TextContent, ToolCall } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model, TextContent, ToolCall } from "@earendil-works/pi-ai";
 import {
   type CreateAgentSessionOptions,
   createAgentSession,
@@ -10,6 +10,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Static, TSchema } from "typebox";
 import { createStructuredOutputTool, type StructuredOutputCapture } from "./structured-output.js";
+
+/** Thinking levels a subagent can run at, lowest to highest reasoning effort. */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export type AgentThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 export interface WorkflowAgentOptions {
   cwd?: string;
@@ -63,6 +67,17 @@ export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefi
   instructions?: string;
   signal?: AbortSignal;
   /**
+   * Model to run this subagent on, resolved against the session's model registry. Accepts
+   * `provider/id` (`openai/gpt-5.5`), a bare id (`gpt-5.5`), or the friendly name (`GPT-5.5`).
+   * Falls back to the orchestrator's model if the name does not resolve.
+   */
+  model?: string;
+  /**
+   * Thinking level for this subagent. When omitted, the subagent uses Pi's default (from settings,
+   * else `medium`) — it is never forced lower; the caller must ask for a lower level explicitly.
+   */
+  thinking?: AgentThinkingLevel;
+  /**
    * Reports the subagent's real metrics as it works — once per completed assistant turn and tool
    * call, and a final authoritative time when it finishes — so the manager can show live activity.
    */
@@ -98,6 +113,9 @@ export class WorkflowAgent {
       customTools.push(createStructuredOutputTool({ schema: options.schema, capture }) as unknown as ToolDefinition);
     }
 
+    // Per-agent model override: resolve the requested name, else keep the orchestrator's model.
+    const sessionModel = (options.model ? this.resolveModel(options.model) : undefined) ?? this.sessionOptions.model;
+
     const agentDir = getAgentDir();
     const { session } = await createAgentSession({
       cwd: this.cwd,
@@ -106,6 +124,9 @@ export class WorkflowAgent {
       settingsManager: SettingsManager.create(this.cwd, agentDir),
       customTools,
       ...this.sessionOptions,
+      model: sessionModel,
+      // Per-agent override; when unset, keep any session-level level, else Pi's own default.
+      thinkingLevel: options.thinking ?? this.sessionOptions.thinkingLevel,
     });
 
     let removeAbortListener: (() => void) | undefined;
@@ -113,7 +134,7 @@ export class WorkflowAgent {
     const emitProgress = () => {
       options.onProgress?.({
         usage: sumUsage(session.messages),
-        model: this.sessionOptions.model?.name ?? lastAssistantModel(session.messages),
+        model: sessionModel?.name ?? lastAssistantModel(session.messages),
         durationMs: Date.now() - startedAt,
         toolCalls: collectToolCalls(session.messages),
       });
@@ -155,6 +176,14 @@ export class WorkflowAgent {
     }
   }
 
+  /**
+   * Resolve a model name against the session's registry, falling back to undefined (and so to the
+   * orchestrator's model) when there is no registry or match — never hard-failing on a typo.
+   */
+  private resolveModel(name: string): Model<any> | undefined {
+    return resolveModelByName(this.sessionOptions.modelRegistry?.getAll() ?? [], name);
+  }
+
   private buildPrompt(prompt: string, options: AgentRunOptions<any>, structured: boolean): string {
     const parts = [
       this.instructions,
@@ -190,6 +219,22 @@ export class WorkflowAgent {
     }
     return "";
   }
+}
+
+/**
+ * Match a model name against a list, case-insensitively. Accepts `provider/id`
+ * (`openai/gpt-5.5`), a bare `id` (`gpt-5.5`), or the friendly display name (`GPT-5.5`). Returns
+ * undefined when nothing matches, so callers fall back to the orchestrator's model.
+ */
+export function resolveModelByName(models: Model<any>[], name: string): Model<any> | undefined {
+  const want = name.trim().toLowerCase();
+  if (!want) return undefined;
+  const qualified = want.includes("/");
+  return models.find((model) =>
+    qualified
+      ? `${model.provider}/${model.id}`.toLowerCase() === want
+      : model.id.toLowerCase() === want || model.name.toLowerCase() === want,
+  );
 }
 
 /**

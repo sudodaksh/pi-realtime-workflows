@@ -2,8 +2,8 @@ import vm from "node:vm";
 import type { Node } from "acorn";
 import { parse } from "acorn";
 import type { TSchema } from "typebox";
-import type { AgentRunStats, AgentUsage } from "./agent.js";
-import { WorkflowAgent, type WorkflowAgentOptions } from "./agent.js";
+import type { AgentRunStats, AgentThinkingLevel, AgentUsage } from "./agent.js";
+import { THINKING_LEVELS, WorkflowAgent, type WorkflowAgentOptions } from "./agent.js";
 
 export interface WorkflowMetaPhase {
   title: string;
@@ -105,6 +105,7 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
   phase?: string;
   schema?: TSchemaDef;
   model?: string;
+  thinking?: AgentThinkingLevel;
   isolation?: "worktree";
   agentType?: string;
 }
@@ -206,6 +207,8 @@ export async function runWorkflow<T = unknown>(
           label,
           schema: normalizedOptions.schema,
           signal: agentController.signal,
+          model: normalizedOptions.model,
+          thinking: normalizedOptions.thinking,
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
           onProgress: (reported: AgentRunStats) => {
             stats = reported;
@@ -365,13 +368,18 @@ export async function runWorkflow<T = unknown>(
 }
 
 export function parseWorkflowScript(script: string): { meta: WorkflowMeta; body: string } {
-  const ast = parse(script, {
-    ecmaVersion: "latest",
-    sourceType: "module",
-    allowAwaitOutsideFunction: true,
-    allowReturnOutsideFunction: true,
-    ranges: false,
-  }) as AnyNode;
+  let ast: AnyNode;
+  try {
+    ast = parse(script, {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      allowAwaitOutsideFunction: true,
+      allowReturnOutsideFunction: true,
+      ranges: false,
+    }) as AnyNode;
+  } catch (error) {
+    throw describeSyntaxError(error, script);
+  }
 
   assertDeterministicAst(ast);
 
@@ -401,6 +409,31 @@ export function parseWorkflowScript(script: string): { meta: WorkflowMeta; body:
     meta,
     body: script.slice(0, first.start) + script.slice(first.end),
   };
+}
+
+/**
+ * Turn acorn's terse "Unexpected token (line:col)" into an actionable error with a code frame, so
+ * the model (and the user) can see the offending line. A far-right column on a long line is almost
+ * always an unescaped quote inside a single-quoted prompt string, so we hint at that.
+ */
+function describeSyntaxError(error: unknown, script: string): Error {
+  const loc = (error as { loc?: { line: number; column: number } }).loc;
+  const base = error instanceof Error ? error.message : String(error);
+  if (!loc) return error instanceof Error ? error : new Error(base);
+
+  const lineText = script.split("\n")[loc.line - 1] ?? "";
+  // Window long lines around the caret so the snippet stays readable.
+  const maxWidth = 120;
+  const start = lineText.length > maxWidth ? Math.max(0, loc.column - 40) : 0;
+  const prefix = start > 0 ? "… " : "";
+  const snippet = prefix + lineText.slice(start, start + maxWidth);
+  const caret = `${" ".repeat(prefix.length + (loc.column - start))}^`;
+  const hint =
+    "\nHint: this is invalid JavaScript, not a workflow rule. The usual cause is an unescaped quote " +
+    "inside a single-quoted string (e.g. 'it's') — escape it (\\') or use a backtick template literal.";
+  return new Error(
+    `Workflow script has a JavaScript syntax error at line ${loc.line}, column ${loc.column + 1}: ${base}\n${snippet}\n${caret}${hint}`,
+  );
 }
 
 function evaluateLiteral(node: AnyNode, path: string): unknown {
@@ -560,9 +593,18 @@ function normalizeAgentOptions(value: unknown): AgentOptions {
     label: optionalString(options.label, "agent label"),
     phase: optionalString(options.phase, "agent phase"),
     model: optionalString(options.model, "agent model"),
+    thinking: normalizeThinking(options.thinking),
     isolation: options.isolation,
     agentType: optionalString(options.agentType, "agent type"),
   };
+}
+
+function normalizeThinking(value: unknown): AgentThinkingLevel | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !(THINKING_LEVELS as readonly string[]).includes(value)) {
+    throw new TypeError(`agent thinking must be one of: ${THINKING_LEVELS.join(", ")}`);
+  }
+  return value as AgentThinkingLevel;
 }
 
 function assertStructuredCloneable(value: unknown, name: string): void {
@@ -585,7 +627,7 @@ function buildAgentInstructions(phase: string | undefined, options: AgentOptions
   if (phase) lines.push(`Workflow phase: ${phase}`);
   if (options.agentType) lines.push(`Act as workflow subagent type: ${options.agentType}`);
   if (options.isolation) lines.push(`Requested isolation: ${options.isolation}`);
-  if (options.model) lines.push(`Requested model: ${options.model}`);
+  // `model` is applied for real (the subagent runs on it), so it is no longer a prompt hint here.
   return lines.length ? lines.join("\n") : undefined;
 }
 
@@ -604,6 +646,7 @@ function journalKey(prompt: string, options: AgentOptions): string {
     options.label ?? null,
     options.phase ?? null,
     options.model ?? null,
+    options.thinking ?? null,
     options.isolation ?? null,
     options.agentType ?? null,
     options.schema ?? null,

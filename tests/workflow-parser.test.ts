@@ -158,3 +158,20 @@ return { ok: true, terms }
   assert.equal(parsed.meta.description, "Catalog Date.now(), Math.random(), and new Date() usage");
   assert.match(parsed.body, /Catalog Date\.now\(\)/);
 });
+
+test("parseWorkflowScript reports a syntax error with a code frame and quoting hint", () => {
+  const script = `export const meta = { name: 'bad', description: 'Unescaped apostrophe in a prompt' }
+phase('Work')
+await agent('Port it. It's complex.', { label: 'port' })
+return { ok: true }
+`;
+  assert.throws(
+    () => parseWorkflowScript(script),
+    (error: Error) => {
+      assert.match(error.message, /syntax error at line 3/);
+      assert.match(error.message, /\^/, "includes a caret pointing at the offending column");
+      assert.match(error.message, /unescaped quote/i, "hints at the usual cause");
+      return true;
+    },
+  );
+});
